@@ -2,6 +2,12 @@
 
 #include <Arduino.h>
 
+#if __has_include("Secrets.h")
+#include "Secrets.h"
+#else
+#error "Net fajla src/Secrets.h: skopirujte src/Secrets.example.h v src/Secrets.h i vpishite WiFi"
+#endif
+
 namespace Config {
 
 // ── Пины ─────────────────────────────────────────────────────────────────────
@@ -71,7 +77,11 @@ constexpr uint32_t CYCLES_DEFAULT = 10;      // сколько циклов за
 // Выдержка в крайних точках (0° и 180°): ротор стоит это время перед разворотом.
 constexpr uint32_t DWELL_MS_DEFAULT = 1000;
 // Скорость поворота: интервал одного импульса шага (мкс/шаг). Больше -> медленнее.
-constexpr uint32_t SPEED_US_DEFAULT = 1200;
+// Было 1200 мкс (~830 шаг/с, старт без разгона) - шаговый двигатель на таком темпе
+// с места срывается/пропускает шаги, и детектор застревания уводил стенд в ERROR.
+// Рабочий нагрузочный стенд на том же железе никогда не шагает быстрее 9000 мкс.
+// 4000 мкс = ~112 °/с (ход 0->180 примерно за 1.6 с). Ускорять из панели осторожно.
+constexpr uint32_t SPEED_US_DEFAULT = 4000;
 // Амплитуда: половина размаха от центра. 90 -> полный ход 0..180. Для безопасного
 // теста на стенде можно уменьшить (например, 30 -> размах 60..120).
 constexpr float AMPLITUDE_DEG_DEFAULT = 90.0f;
@@ -82,7 +92,7 @@ constexpr uint32_t CYCLES_MIN = 1;
 constexpr uint32_t CYCLES_MAX = 1000000;
 constexpr uint32_t DWELL_MS_MIN = 0;
 constexpr uint32_t DWELL_MS_MAX = 600000;    // 10 минут
-constexpr uint32_t SPEED_US_MIN = 200;       // быстрее рискует пропуском шагов
+constexpr uint32_t SPEED_US_MIN = 1000;      // быстрее рискует пропуском шагов (разгона нет)
 constexpr uint32_t SPEED_US_MAX = 60000;
 constexpr float AMPLITUDE_DEG_MIN = 5.0f;
 constexpr float AMPLITUDE_DEG_MAX = 90.0f;   // центр 90 +- 90 = ход 0..180
@@ -102,9 +112,19 @@ constexpr int32_t HOME_STEP_CHUNK = 8;
 // Порог перехода с грубого хода на точный (по одному шагу). Заметно больше пачки
 // HOME_STEP_CHUNK*DEGREES_PER_STEP, чтобы торможение начиналось до окна.
 constexpr float MOVE_COARSE_BAND_DEG = 6.0f;
-// Интервал импульса при homing/переходах в центр. На уровне рабочей скорости цикла
-// по умолчанию (движение замкнуто по энкодеру и защищено детектором застревания).
-constexpr uint32_t HOME_STEP_INTERVAL_US = 1200;
+// Интервал импульса при homing/переходах в центр. Намеренно медленный (было 1200 мкс -
+// двигатель срывался при homing сразу после загрузки).
+constexpr uint32_t HOME_STEP_INTERVAL_US = 5000;
+
+// Автоопределение полярности DIR при загрузке (перед homing): мотор делает
+// DIR_PROBE_STEPS шагов «вперёд», и по знаку изменения угла энкодера прошивка сама
+// решает, нужно ли инвертировать линию DIR. Управление замкнуто по энкодеру, и при
+// обратной полярности (другая распайка мотора / магнит энкодера с другой стороны)
+// вал уходил бы ОТ цели -> «Move stalled» -> ERROR. Если за пробу вал сдвинулся
+// меньше DIR_PROBE_MIN_DEG - мотор не крутится (питание/драйвер/пины), homing
+// прерывается с понятной ошибкой в Serial.
+constexpr int32_t DIR_PROBE_STEPS = 20;      // 20 * 0.45° = 9°
+constexpr float DIR_PROBE_MIN_DEG = 3.0f;
 
 constexpr uint32_t DRIVER_POWER_SETTLE_MS = 800;
 constexpr uint32_t HOMING_SETTLE_MS = 400;
@@ -118,7 +138,7 @@ constexpr uint32_t HOME_MAX_TRAVEL_STEPS = 6400;
 // энкодера не продвинулся к цели хотя бы на MIN_PROGRESS_DEG, вал застрял/
 // проскальзывает -> ERROR. Заменяет детекторы стенки нагрузочного стенда: здесь
 // нет нагрузки, поэтому единственный отказ - «вал не крутится, как ожидалось».
-constexpr uint32_t MOVE_STALL_TIMEOUT_MS = 800;
+constexpr uint32_t MOVE_STALL_TIMEOUT_MS = 1500;
 constexpr float MOVE_MIN_PROGRESS_DEG = 0.8f;
 
 // Окно, в пределах которого целевой угол считается достигнутым. Заметно больше
@@ -134,6 +154,10 @@ constexpr float ENCODER_HOME_WINDOW_DEG = 1.5f;
 constexpr float ENCODER_POSITION_ERROR_DEG = 30.0f;
 constexpr uint8_t ENCODER_ERROR_LIMIT = 20;
 constexpr uint8_t ENCODER_READ_ERROR_LIMIT = 5;
+// Повторы одного чтения AS5600 внутри EncoderTracker::update(). Драйвер шагового
+// двигателя наводит помехи на I2C; одиночный сбой чтения не должен сразу ронять
+// движение в ERROR (рабочая прошивка ошибки I2C вообще игнорирует).
+constexpr uint8_t ENCODER_READ_RETRIES = 3;
 
 // ── Тайминги задач / кнопки / отчётов ────────────────────────────────────────
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 40;
@@ -146,9 +170,10 @@ constexpr BaseType_t MOTOR_TASK_CORE = 1;
 constexpr uint32_t BUTTON_QUEUE_LENGTH = 8;
 
 // ── Сеть / WiFi / дашборд ────────────────────────────────────────────────────
-// Учётные данные WiFi - заглушка; заменить на реальную сеть перед прошивкой.
-constexpr const char* WIFI_SSID = "tmvos-internet";
-constexpr const char* WIFI_PASSWORD = "tmvoswifi";
+// Учётные данные WiFi лежат в src/Secrets.h - этот файл не хранится в git (см.
+// .gitignore). Шаблон: src/Secrets.example.h.
+constexpr const char* WIFI_SSID = Secrets::WIFI_SSID;
+constexpr const char* WIFI_PASSWORD = Secrets::WIFI_PASSWORD;
 // Имя хоста mDNS БЕЗ суффикса ".local" - MDNS.begin() добавляет ".local" сам.
 // Число в начале - номер стенда, "bend" - тип стенда (изгиб). Итоговый домен:
 // 1.bend.esp32-s3.local.
