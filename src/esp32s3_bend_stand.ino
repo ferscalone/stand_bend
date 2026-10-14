@@ -283,6 +283,47 @@ bool checkEncoderSlip(float* outErrorDeg = nullptr) {
   return fault;
 }
 
+// ── Автоопределение полярности DIR ───────────────────────────────────────────
+// Делает DIR_PROBE_STEPS шагов «вперёд» и смотрит, куда сдвинулся энкодер. Если угол
+// уменьшился - инвертирует DIR, чтобы логическое «+» всегда совпадало с ростом угла
+// энкодера (на этом держится вся замкнутая по энкодеру логика движения). Если вал
+// почти не сдвинулся - мотор не крутится: возвращает false с диагностикой.
+bool probeMotorDirection() {
+  if (!gEncoder.update()) {
+    Serial.println("[ERROR] Encoder read failed before direction probe");
+    return false;
+  }
+  const int32_t before = gEncoder.getMultiTurnCounts();
+  gMotor.moveSteps(Config::DIR_PROBE_STEPS, Config::HOME_STEP_INTERVAL_US);
+  gMotor.stop();
+  delay(Config::MOVE_VERIFY_SETTLE_MS);
+  if (!gEncoder.update()) {
+    Serial.println("[ERROR] Encoder read failed after direction probe");
+    return false;
+  }
+  const float movedDeg = static_cast<float>(gEncoder.getMultiTurnCounts() - before) *
+                         (Config::DEGREES_PER_REV / Config::ENCODER_COUNTS_PER_REV);
+  const float expectedDeg = Config::DIR_PROBE_STEPS * Config::DEGREES_PER_STEP;
+  Serial.printf("[PROBE] %ld steps forward -> encoder moved %.2f deg (expected ~%.2f)\n",
+                static_cast<long>(Config::DIR_PROBE_STEPS), static_cast<double>(movedDeg),
+                static_cast<double>(expectedDeg));
+
+  if (fabsf(movedDeg) < Config::DIR_PROBE_MIN_DEG) {
+    Serial.println("[ERROR] Motor did not move the shaft: check driver power/enable, "
+                   "STEP/DIR wiring (PIN_STEP_P/PIN_DIR_P in Config.h) and that the "
+                   "encoder magnet is on the same shaft");
+    NetworkManager::queueEvent(buildEventJson("error", "motor_not_moving").c_str());
+    return false;
+  }
+  if (movedDeg < 0.0f) {
+    gMotor.setInvertDirection(!gMotor.isDirectionInverted());
+    Serial.println("[PROBE] Encoder counts opposite to motor - DIR inverted in software");
+  } else {
+    Serial.println("[PROBE] Motor/encoder direction OK");
+  }
+  return true;
+}
+
 // ── Homing к абсолютному домашнему углу (захват логического нуля) ─────────────
 // Приводит вал к HOME_ABSOLUTE_ANGLE_DEG (= bend 180°, логический ноль), подтверждает
 // несколькими отсчётами и захватывает логический ноль. Направление - кратчайшая дуга
@@ -299,12 +340,28 @@ bool runHoming() {
 
   delay(Config::HOMING_SETTLE_MS);
 
-  uint32_t safetyCounter = 0;
-  while (true) {
-    if (!gEncoder.update()) {
-      Serial.println("[ERROR] Encoder read failed during homing move");
+  // Полярность мотор/энкодер проверяется один раз за загрузку (до первого homing).
+  static bool directionProbed = false;
+  if (!directionProbed) {
+    if (!probeMotorDirection()) {
       return false;
     }
+    directionProbed = true;
+  }
+
+  uint32_t safetyCounter = 0;
+  uint8_t readErrors = 0;
+  while (true) {
+    // Дать поработать loop() (сеть/[DIAG]) - он на том же ядре 1 с меньшим приоритетом.
+    vTaskDelay(1);
+    if (!gEncoder.update()) {
+      if (++readErrors >= Config::ENCODER_READ_ERROR_LIMIT) {
+        Serial.println("[ERROR] Encoder read failed during homing move");
+        return false;
+      }
+      continue;
+    }
+    readErrors = 0;
 
     const float absoluteDeg = gEncoder.getAbsoluteDegrees();
     const float homeErrorDeg = EncoderTracker::shortestDeltaDegrees(absoluteDeg, Config::HOME_ABSOLUTE_ANGLE_DEG);
@@ -388,8 +445,12 @@ bool moveToRelDeg(float targetRelDeg, uint32_t stepIntervalUs, bool allowAbort, 
   float bestErr = fabsf(targetRelDeg - gEncoder.getRelativeDegrees());
   uint32_t lastProgressMs = millis();
   uint32_t safetyCounter = 0;
+  uint8_t readErrors = 0;
 
   while (true) {
+    // Дать поработать loop() (сеть/[DIAG]/команды) - он на том же ядре 1 с меньшим
+    // приоритетом и без этого почти не получал процессор во время движения.
+    vTaskDelay(1);
     // Опрос кнопки в прерываемых плечах прогона: нажатие в RUNNING поднимет
     // gStopRequested, и движение прервётся здесь же (кнопка работает во время цикла).
     if (allowAbort) {
@@ -403,10 +464,15 @@ bool moveToRelDeg(float targetRelDeg, uint32_t stepIntervalUs, bool allowAbort, 
     }
 
     if (!gEncoder.update()) {
-      Serial.println("[ERROR] Encoder read failed during move");
-      gMotor.stop();
-      return false;
+      // Одиночные сбои I2C (помехи от драйвера) пропускаем; отказ - только серия подряд.
+      if (++readErrors >= Config::ENCODER_READ_ERROR_LIMIT) {
+        Serial.println("[ERROR] Encoder read failed during move");
+        gMotor.stop();
+        return false;
+      }
+      continue;
     }
+    readErrors = 0;
 
     const float relDeg = gEncoder.getRelativeDegrees();
     const float errDeg = targetRelDeg - relDeg;

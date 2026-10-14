@@ -35,13 +35,19 @@ bool EncoderTracker::begin(TwoWire& wire) {
   // begin(4), который ошибочно конфигурировал GPIO4 как "аппаратный" пин направления
   // AS5600 (pinMode+digitalWrite внутри библиотеки) - а GPIO4 это же PIN_STEP_P (импульс
   // ШАГ мотора) из Config.h: два разных модуля дрались за один физический пин.
-  if (!encoder_.begin()) {
+  // Несколько попыток: сразу после подачи питания драйвера шина может быть шумной.
+  bool connected = false;
+  for (uint8_t attempt = 0; attempt < 5 && !connected; ++attempt) {
+    connected = encoder_.begin();
+    if (!connected) delay(50);
+  }
+  if (!connected) {
     Serial.println("[ENCODER] AS5600 (0x36) did not ACK on the I2C bus");
     return false;
   }
 
-  const uint16_t raw = encoder_.rawAngle();
-  if (encoder_.lastError() != AS5600_OK) {
+  uint16_t raw = 0;
+  if (!readRawWithRetry(raw)) {
     // Раньше здесь стояла проверка "raw > 4095", которая никогда не срабатывала:
     // rawAngle() в библиотеке всегда маскирует результат в диапазон 0..4095 (& 0x0FFF),
     // причём даже при полностью оборванной шине I2C (тогда она просто возвращает 0).
@@ -63,8 +69,8 @@ bool EncoderTracker::update() {
     return false;
   }
 
-  const uint16_t raw = encoder_.rawAngle();
-  if (encoder_.lastError() != AS5600_OK) {
+  uint16_t raw = 0;
+  if (!readRawWithRetry(raw)) {
     // См. комментарий в begin(): "raw > 4095" никогда не срабатывает, т.к. rawAngle()
     // всегда возвращает значение в диапазоне 0..4095, даже при обрыве I2C.
     return false;
@@ -80,6 +86,18 @@ bool EncoderTracker::update() {
   multiTurnCounts_ += delta;
   lastRaw_ = static_cast<int16_t>(raw);
   return true;
+}
+
+bool EncoderTracker::readRawWithRetry(uint16_t& out) {
+  for (uint8_t attempt = 0; attempt < Config::ENCODER_READ_RETRIES; ++attempt) {
+    const uint16_t raw = encoder_.rawAngle();
+    if (encoder_.lastError() == AS5600_OK) {
+      out = raw;
+      return true;
+    }
+    delayMicroseconds(200);
+  }
+  return false;
 }
 
 void EncoderTracker::captureLogicalZero() {

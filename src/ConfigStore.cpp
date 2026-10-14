@@ -9,7 +9,10 @@
 // AsyncTCP внутри обработчика POST.
 namespace {
 constexpr const char* kNamespace = "bendcfg";
-constexpr const char* kKeyBlob = "cfg";
+// "cfg2" (было "cfg"): новый ключ, чтобы после перепрошивки НЕ подхватился старый
+// сохранённый конфиг со слишком быстрой скоростью 1200 мкс/шаг - при первой загрузке
+// применяются новые умолчания из Config.h.
+constexpr const char* kKeyBlob = "cfg2";
 
 // Раскладка blob во flash. Обычный POD, копируется memcpy в/из байтов NVS. Приём с
 // проверкой РАЗМЕРА (см. load()) отличает корректный blob от отсутствующего/

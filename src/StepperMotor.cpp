@@ -25,8 +25,25 @@ void StepperMotor::stop() {
 }
 
 void StepperMotor::setDirection(bool forward) {
+  const bool changed = (forward != directionForward_);
   directionForward_ = forward;
-  digitalWrite(dirPlusPin_, forward ? HIGH : LOW);
+  const bool physical = forward != invertDirection_;
+  digitalWrite(dirPlusPin_, physical ? HIGH : LOW);
+  if (changed) {
+    // Время установки DIR перед первым импульсом STEP (драйверам нужно единицы мкс).
+    // Изгибный стенд реверсирует постоянно, в отличие от нагрузочного.
+    delayMicroseconds(20);
+  }
+}
+
+void StepperMotor::setInvertDirection(bool invert) {
+  invertDirection_ = invert;
+  digitalWrite(dirPlusPin_, (directionForward_ != invertDirection_) ? HIGH : LOW);
+  delayMicroseconds(20);
+}
+
+bool StepperMotor::isDirectionInverted() const {
+  return invertDirection_;
 }
 
 void StepperMotor::moveSteps(int32_t steps, uint32_t stepIntervalUs) {

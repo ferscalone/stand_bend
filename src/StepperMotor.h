@@ -13,6 +13,10 @@ class StepperMotor {
   int32_t getExpectedSteps() const;
   float getExpectedDegrees() const;
   void resetExpectedPosition();
+  // Инверсия физической линии DIR. Логическое «вперёд» (+шаги) после этого всегда
+  // соответствует росту угла энкодера (выставляется автопробой при загрузке).
+  void setInvertDirection(bool invert);
+  bool isDirectionInverted() const;
 
  private:
   void pulseStep(uint32_t stepIntervalUs);
@@ -22,6 +26,7 @@ class StepperMotor {
   uint8_t dirPlusPin_;
   uint8_t dirMinusPin_;
   bool directionForward_ = true;
+  bool invertDirection_ = false;
   int32_t expectedSteps_ = 0;
 };
 

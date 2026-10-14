@@ -19,6 +19,8 @@ class EncoderTracker {
   static float shortestDeltaDegrees(float from, float to);
 
  private:
+  bool readRawWithRetry(uint16_t& out);
+
   AS5600 encoder_{&Wire};
   bool initialized_ = false;
   bool logicalZeroCaptured_ = false;
